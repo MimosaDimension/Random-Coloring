@@ -1,117 +1,166 @@
-// script.js — Random Coloring with images folder + manifest.json
-// Behavior:
-// 1) try fetch('/images/manifest.json')
-// 2) if success: use that array of filenames
-// 3) else: fallback to embedded list (so site still works)
-// This allows you to add new images by uploading files to /images and updating manifest.json only.
+/* script.js
+   Random Coloring — paint under SVG outlines.
+   - paintCanvas: user drawings (brush/eraser/fill)
+   - outlineCanvas: SVG contours, always on top (pointer-events: none)
+   - images/manifest.json is used to choose random SVGs.
+*/
 
-const outlineCanvas = document.getElementById('outlineCanvas');
+// DOM
 const paintCanvas = document.getElementById('paintCanvas');
+const outlineCanvas = document.getElementById('outlineCanvas');
+const canvasWrap = document.getElementById('canvasWrap');
+
+const paintCtx = paintCanvas.getContext('2d');
+const outlineCtx = outlineCanvas.getContext('2d');
+
+// UI
+const colorPicker = document.getElementById('colorPicker');
+const sizeRange = document.getElementById('sizeRange');
 
 let tool = 'brush';
 let color = '#FF6B6B';
 let size = 12;
 let drawing = false;
 let last = {x:0,y:0};
+let currentSVGUrl = null;
 
+// Fallback list in case manifest not available
 const fallbackFiles = [
   "images/sample1.svg",
   "images/sample2.svg",
   "images/sample3.svg"
 ];
 
-// --- UTIL: resize canvases to CSS pixel size
-function resizeCanvasesToCSS() {
-  const wrap = outlineCanvas.parentElement;
-  const rect = wrap.getBoundingClientRect();
-  const w = Math.round(rect.width);
-  const h = Math.round(rect.height);
-  [outlineCanvas, paintCanvas].forEach(c=>{
-    // preserve existing content when resizing (for paintCanvas)
-    if(c === paintCanvas && c.width && c.height){
-      const temp = document.createElement('canvas');
-      temp.width = c.width; temp.height = c.height;
-      temp.getContext('2d').drawImage(c, 0,0);
-      c.width = w; c.height = h;
-      c.getContext('2d').drawImage(temp, 0,0, w, h);
-    } else {
-      c.width = w; c.height = h;
-    }
+// --- Utility: resize canvases to wrapper size (handles HiDPI)
+function resizeCanvases(preservePaint = true) {
+  const rect = canvasWrap.getBoundingClientRect();
+  const cssW = Math.max(1, Math.round(rect.width));
+  const cssH = Math.max(1, Math.round(rect.height));
+  const dpr = window.devicePixelRatio || 1;
+
+  // Save existing paint content
+  let tempImage = null;
+  if (preservePaint && paintCanvas.width && paintCanvas.height) {
+    tempImage = document.createElement('canvas');
+    tempImage.width = paintCanvas.width;
+    tempImage.height = paintCanvas.height;
+    const tctx = tempImage.getContext('2d');
+    tctx.drawImage(paintCanvas, 0, 0);
+  }
+
+  // Set CSS size and pixel size with DPR
+  [paintCanvas, outlineCanvas].forEach(c => {
+    c.style.width = cssW + 'px';
+    c.style.height = cssH + 'px';
+    c.width = Math.round(cssW * dpr);
+    c.height = Math.round(cssH * dpr);
   });
+
+  // Reset transforms so we can draw using CSS px coordinates
+  paintCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  outlineCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  // Restore paint content scaled to new size
+  if (tempImage) {
+    // tempImage is in previous pixel size; draw it scaled to new css size
+    paintCtx.clearRect(0,0,cssW,cssH);
+    paintCtx.drawImage(tempImage, 0, 0, cssW, cssH);
+  } else {
+    paintCtx.clearRect(0,0,cssW,cssH);
+  }
+
+  // Re-render outline (SVG) if one is loaded
+  if (currentSVGUrl) {
+    // re-draw svg into outline canvas
+    renderSVGToOutline(currentSVGUrl).catch(err => console.error(err));
+  } else {
+    outlineCtx.clearRect(0,0,cssW,cssH);
+  }
 }
 
-// --- load manifest.json (list of images)
+// --- Load manifest.json (list of images)
 async function loadManifest(){
   try {
     const res = await fetch('images/manifest.json', {cache: "no-store"});
     if(!res.ok) throw new Error('no manifest');
     const list = await res.json();
     if(!Array.isArray(list) || list.length === 0) throw new Error('manifest empty');
-    // normalize paths: if names don't include folder, add prefix
     return list.map(name => name.startsWith('images/') ? name : `images/${name}`);
-  } catch (e){
-    // fallback
+  } catch (e) {
     return fallbackFiles;
   }
 }
 
-// --- render svg file (from /images/*.svg) to outline canvas
-async function renderSVGFileToOutline(url){
+// --- Render SVG file (URL) into the outlineCanvas, centered & fit
+async function renderSVGToOutline(url){
   try {
     const res = await fetch(url);
-    if(!res.ok) throw new Error('failed fetch svg');
+    if(!res.ok) throw new Error('Failed to fetch SVG: ' + url);
     const svgText = await res.text();
-    // create data URL
+    // create data URL (encode)
     const svg64 = btoa(unescape(encodeURIComponent(svgText)));
     const dataUrl = 'data:image/svg+xml;base64,' + svg64;
     const img = new Image();
+    // allow cross-origin drawing; data URL is fine
     img.src = dataUrl;
     await img.decode();
-    const ctx = outlineCanvas.getContext('2d');
-    ctx.clearRect(0,0,outlineCanvas.width,outlineCanvas.height);
-    // fit image preserving aspect ratio
-    const margin = 0.08;
-    const cw = outlineCanvas.width, ch = outlineCanvas.height;
-    const iw = img.width || 800, ih = img.height || 600;
-    const scale = Math.min((1-2*margin)*cw/iw, (1-2*margin)*ch/ih);
-    const iwScaled = iw * scale, ihScaled = ih * scale;
-    const dx = (cw - iwScaled)/2, dy = (ch - ihScaled)/2;
-    ctx.drawImage(img, dx, dy, iwScaled, ihScaled);
+
+    // draw into outline canvas fitting with margin and preserving aspect ratio
+    const rect = canvasWrap.getBoundingClientRect();
+    const cssW = Math.max(1, Math.round(rect.width));
+    const cssH = Math.max(1, Math.round(rect.height));
+    const margin = 0.06; // small margin on sides
+    const iw = img.width || 800;
+    const ih = img.height || 600;
+    const availableW = cssW * (1 - 2 * margin);
+    const availableH = cssH * (1 - 2 * margin);
+    const scale = Math.min(availableW / iw, availableH / ih);
+    const iwScaled = iw * scale;
+    const ihScaled = ih * scale;
+    const dx = (cssW - iwScaled) / 2;
+    const dy = (cssH - ihScaled) / 2;
+
+    // Clear outline and draw
+    outlineCtx.clearRect(0, 0, cssW, cssH);
+    outlineCtx.drawImage(img, dx, dy, iwScaled, ihScaled);
   } catch(err){
-    console.error('render error', err);
+    console.error('renderSVGToOutline error', err);
   }
 }
 
-// --- drawing and UI
-function setToolStateFromUI(){
+// --- Drawing helpers
+
+function setToolFromUI(){
   document.querySelectorAll('input[name="tool"]').forEach(r=>{
-    r.addEventListener('change', e=>{
-      tool = e.target.value;
-    });
+    r.addEventListener('change', e => tool = e.target.value);
   });
-  document.getElementById('colorPicker').addEventListener('input', e=> color = e.target.value);
-  document.getElementById('sizeRange').addEventListener('input', e=> size = +e.target.value);
-  document.getElementById('backBtn').addEventListener('click', ()=> location.href='index.html');
+  colorPicker.addEventListener('input', e => color = e.target.value);
+  sizeRange.addEventListener('input', e => size = +e.target.value);
+
+  document.getElementById('backBtn').addEventListener('click', ()=> location.href = 'index.html');
   document.getElementById('clearBtn').addEventListener('click', ()=> {
-    paintCanvas.getContext('2d').clearRect(0,0,paintCanvas.width,paintCanvas.height);
+    const rect = canvasWrap.getBoundingClientRect();
+    paintCtx.clearRect(0,0,rect.width,rect.height);
   });
+
   document.getElementById('saveBtn').addEventListener('click', saveAsPNG);
   document.getElementById('newBtn').addEventListener('click', async ()=> {
     await setupRandomImage();
   });
 }
 
-function getPos(ev, canvas){
-  const rect = canvas.getBoundingClientRect();
-  const x = (ev.clientX ?? ev.touches?.[0]?.clientX) - rect.left;
-  const y = (ev.clientY ?? ev.touches?.[0]?.clientY) - rect.top;
-  return {x, y};
+// pointer position relative to canvas CSS coords
+function getPos(ev){
+  const rect = canvasWrap.getBoundingClientRect();
+  const clientX = ev.clientX ?? (ev.touches && ev.touches[0] && ev.touches[0].clientX);
+  const clientY = ev.clientY ?? (ev.touches && ev.touches[0] && ev.touches[0].clientY);
+  return { x: clientX - rect.left, y: clientY - rect.top };
 }
 
 function startDrawing(ev){
   ev.preventDefault();
   drawing = true;
-  last = getPos(ev, paintCanvas);
+  last = getPos(ev);
   if(tool === 'fill'){
     floodFill(Math.round(last.x), Math.round(last.y), hexToRgba(color), 30);
   } else if(tool === 'eraser'){
@@ -120,37 +169,41 @@ function startDrawing(ev){
     drawStroke(last, last, false);
   }
 }
+
 function moveDrawing(ev){
   if(!drawing) return;
   ev.preventDefault();
-  const pos = getPos(ev, paintCanvas);
+  const pos = getPos(ev);
   drawStroke(last, pos, tool === 'eraser');
   last = pos;
 }
+
 function stopDrawing(ev){
   drawing = false;
 }
 
+// draws a stroke on paintCtx
 function drawStroke(p0, p1, eraser=false){
-  const ctx = paintCanvas.getContext('2d');
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-  ctx.lineWidth = size;
+  paintCtx.lineCap = 'round';
+  paintCtx.lineJoin = 'round';
+  paintCtx.lineWidth = size;
   if(eraser){
-    ctx.globalCompositeOperation = 'destination-out';
-    ctx.strokeStyle = 'rgba(0,0,0,1)';
+    paintCtx.globalCompositeOperation = 'destination-out';
+    paintCtx.strokeStyle = 'rgba(0,0,0,1)';
   } else {
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.strokeStyle = color;
+    paintCtx.globalCompositeOperation = 'source-over';
+    paintCtx.strokeStyle = color;
   }
-  ctx.beginPath();
-  ctx.moveTo(p0.x, p0.y);
-  ctx.lineTo(p1.x, p1.y);
-  ctx.stroke();
-  ctx.closePath();
-  ctx.globalCompositeOperation = 'source-over';
+  paintCtx.beginPath();
+  paintCtx.moveTo(p0.x, p0.y);
+  paintCtx.lineTo(p1.x, p1.y);
+  paintCtx.stroke();
+  paintCtx.closePath();
+  paintCtx.globalCompositeOperation = 'source-over';
 }
 
+// --- Flood fill (paints only into regions not blocked by outline)
+// Outline is read from outlineCtx imageData alpha channel.
 function hexToRgba(hex){
   const h = hex.replace('#','');
   const bigint = parseInt(h.length===3 ? h.split('').map(c=>c+c).join('') : h, 16);
@@ -161,35 +214,33 @@ function hexToRgba(hex){
 }
 
 function colorMatch(data, idx, color, tol=0){
-  return Math.abs(data[idx]-color.r) <= tol &&
-         Math.abs(data[idx+1]-color.g) <= tol &&
-         Math.abs(data[idx+2]-color.b) <= tol &&
-         Math.abs(data[idx+3]-color.a) <= tol;
+  return Math.abs(data[idx] - color.r) <= tol &&
+         Math.abs(data[idx+1] - color.g) <= tol &&
+         Math.abs(data[idx+2] - color.b) <= tol &&
+         Math.abs(data[idx+3] - color.a) <= tol;
 }
 
 function floodFill(startX, startY, fillColor, tolerance=30){
-  const w = paintCanvas.width, h = paintCanvas.height;
+  const rect = canvasWrap.getBoundingClientRect();
+  const w = Math.round(rect.width), h = Math.round(rect.height);
   if(startX < 0 || startY < 0 || startX >= w || startY >= h) return;
-  const pCtx = paintCanvas.getContext('2d');
-  const oCtx = outlineCanvas.getContext('2d');
-  const paintImg = pCtx.getImageData(0,0,w,h);
-  const outlineImg = oCtx.getImageData(0,0,w,h);
+  const pImg = paintCtx.getImageData(0,0,w,h);
+  const oImg = outlineCtx.getImageData(0,0,w,h);
+  const data = pImg.data;
+  const odata = oImg.data;
 
-  const data = paintImg.data;
-  const odata = outlineImg.data;
   const stack = [];
   const startIdx = (startY * w + startX) * 4;
-  const target = {r: data[startIdx], g: data[startIdx+1], b: data[startIdx+2], a: data[startIdx+3]};
+  const target = { r: data[startIdx], g: data[startIdx+1], b: data[startIdx+2], a: data[startIdx+3] };
 
-  // If clicked on an outline pixel, do nothing
-  const outlineAlpha = odata[startIdx+3];
-  if(outlineAlpha > 10) return;
+  // if clicked directly on outline (alpha>10), do nothing
+  if(odata[startIdx + 3] > 10) return;
 
+  // if target already equals fillColor (within tol) and opaque, skip
   if(Math.abs(target.r - fillColor.r) <= tolerance &&
      Math.abs(target.g - fillColor.g) <= tolerance &&
-     Math.abs(target.b - fillColor.b) <= tolerance){
-    if(target.a === 255) return;
-  }
+     Math.abs(target.b - fillColor.b) <= tolerance &&
+     target.a === 255) return;
 
   stack.push([startX, startY]);
   const visited = new Uint8Array(w * h);
@@ -201,10 +252,13 @@ function floodFill(startX, startY, fillColor, tolerance=30){
     if(visited[idx]) continue;
     visited[idx] = 1;
 
-    if(odata[id+3] > 10) continue;
+    // stop if outline at this pixel
+    if(odata[id + 3] > 10) continue;
 
+    // check target color match
     if(!colorMatch(data, id, target, tolerance) && !(data[id+3] === 0 && target.a === 0)) continue;
 
+    // paint pixel
     data[id] = fillColor.r;
     data[id+1] = fillColor.g;
     data[id+2] = fillColor.b;
@@ -216,27 +270,24 @@ function floodFill(startX, startY, fillColor, tolerance=30){
     if(y-1 >= 0) stack.push([x,y-1]);
   }
 
-  pCtx.putImageData(paintImg, 0, 0);
+  paintCtx.putImageData(pImg, 0, 0);
 }
 
-async function setupRandomImage(){
-  const list = await loadManifest();
-  const idx = Math.floor(Math.random() * list.length);
-  const url = list[idx];
-  // clear paint canvas
-  paintCanvas.getContext('2d').clearRect(0,0,paintCanvas.width,paintCanvas.height);
-  await renderSVGFileToOutline(url);
-}
-
+// --- Save combined image (paint under outline) as PNG
 function saveAsPNG(){
-  // combine outline + paint into one canvas and download
-  const w = paintCanvas.width, h = paintCanvas.height;
+  const rect = canvasWrap.getBoundingClientRect();
+  const cssW = Math.round(rect.width), cssH = Math.round(rect.height);
+  // create combination canvas at CSS pixels (not DPR) for convenient saving at screen resolution
   const combo = document.createElement('canvas');
-  combo.width = w; combo.height = h;
+  combo.width = cssW;
+  combo.height = cssH;
   const ctx = combo.getContext('2d');
-  // draw outline (as top-level black strokes) but we want outlines visible; draw outline first, then paints
-  ctx.drawImage(outlineCanvas, 0,0);
-  ctx.drawImage(paintCanvas, 0,0);
+
+  // draw paint first (under), then outline on top
+  // drawImage will scale from canvas pixel buffer to combo size if necessary
+  ctx.drawImage(paintCanvas, 0, 0, combo.width, combo.height);
+  ctx.drawImage(outlineCanvas, 0, 0, combo.width, combo.height);
+
   const dataUrl = combo.toDataURL('image/png');
   const a = document.createElement('a');
   a.href = dataUrl;
@@ -244,26 +295,55 @@ function saveAsPNG(){
   a.click();
 }
 
-// --- init
+// --- Choose and load a random SVG from manifest
+async function setupRandomImage(){
+  try {
+    const list = await loadManifest();
+    const idx = Math.floor(Math.random() * list.length);
+    const url = list[idx];
+    currentSVGUrl = url;
+    // clear paint canvas
+    const rect = canvasWrap.getBoundingClientRect();
+    paintCtx.clearRect(0,0,rect.width,rect.height);
+    await renderSVGToOutline(url);
+  } catch(err){
+    console.error('setupRandomImage error', err);
+  }
+}
+
+// --- Init and event wiring
+function bindPointerEvents(){
+  // pointer events are used (works on touch and mouse)
+  paintCanvas.addEventListener('pointerdown', startDrawing, {passive:false});
+  paintCanvas.addEventListener('pointermove', moveDrawing, {passive:false});
+  window.addEventListener('pointerup', stopDrawing);
+
+  // also support touch-specific events as fallback (some older browsers)
+  paintCanvas.addEventListener('touchstart', startDrawing, {passive:false});
+  paintCanvas.addEventListener('touchmove', moveDrawing, {passive:false});
+  paintCanvas.addEventListener('touchend', stopDrawing);
+  paintCanvas.addEventListener('contextmenu', e => e.preventDefault());
+}
+
 let initialized = false;
 async function init(){
   if(initialized) return;
   initialized = true;
-  resizeCanvasesToCSS();
+
+  // initial resize
+  resizeCanvases(false);
+
+  // re-resize when window changes (preserve painting)
+  let resizeTimer = null;
   window.addEventListener('resize', ()=> {
-    // preserve painting on resize handled in resizeCanvasesToCSS
-    resizeCanvasesToCSS();
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(()=> resizeCanvases(true), 120);
   });
 
-  setToolStateFromUI();
+  setToolFromUI();
+  bindPointerEvents();
 
-  // pointer & touch events
-  ['pointerdown','touchstart','mousedown'].forEach(ev => paintCanvas.addEventListener(ev, startDrawing, {passive:false}));
-  ['pointermove','touchmove','mousemove'].forEach(ev => paintCanvas.addEventListener(ev, moveDrawing, {passive:false}));
-  ['pointerup','touchend','mouseup','mouseleave','touchcancel'].forEach(ev => paintCanvas.addEventListener(ev, stopDrawing));
-
-  paintCanvas.addEventListener('contextmenu', e => e.preventDefault());
-
+  // load first random image
   await setupRandomImage();
 }
 
