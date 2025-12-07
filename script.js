@@ -1,12 +1,9 @@
-/* script.js
-   Random Coloring — paint under SVG outlines.
-   - paintCanvas: user drawings (brush/eraser/fill)
-   - outlineCanvas: SVG contours, always on top (pointer-events: none)
-   - images/manifest.json is used to choose random SVGs.
-   - Palette: 21 default colors + custom favorites stored in localStorage
+/* script.js — исправленная версия
+   Главный фикс: floodFill и работа с ImageData теперь используют pixel coordinates (умножаем CSS coords на DPR)
+   и всегда читают/записывают данные с размерами canvas.width / canvas.height (в пикселях).
 */
 
-// ----- DOM elements -----
+/* ----- DOM ----- */
 const paintCanvas = document.getElementById('paintCanvas');
 const outlineCanvas = document.getElementById('outlineCanvas');
 const canvasWrap = document.getElementById('canvasWrap');
@@ -14,8 +11,8 @@ const canvasWrap = document.getElementById('canvasWrap');
 const paintCtx = paintCanvas.getContext('2d');
 const outlineCtx = outlineCanvas.getContext('2d');
 
-const colorPicker = document.getElementById('colorPicker');    // top picker in toolbar
-const pickerBottom = document.getElementById('pickerBottom');  // bottom picker near palette
+const colorPicker = document.getElementById('colorPicker');    // top picker
+const pickerBottom = document.getElementById('pickerBottom');  // bottom picker
 const sizeRange = document.getElementById('sizeRange');
 
 const defaultPaletteEl = document.getElementById('defaultPalette');
@@ -23,7 +20,7 @@ const customPaletteEl = document.getElementById('customPalette');
 const addColorBtn = document.getElementById('addColorBtn');
 const clearCustomBtn = document.getElementById('clearCustomBtn');
 
-// ----- State -----
+/* ----- State ----- */
 let tool = 'brush';
 let currentColor = '#FF6B6B';
 let size = 12;
@@ -31,7 +28,7 @@ let drawing = false;
 let last = {x:0,y:0};
 let currentSVGUrl = null;
 
-// ----- Default colors (21) -----
+/* ----- palettes ----- */
 const defaultColors = [
   "#000000","#474747","#7f7f7f","#bfbfbf","#ffffff",
   "#ff4d4d","#e63946","#b00020",
@@ -41,34 +38,32 @@ const defaultColors = [
   "#06b6d4","#0891b2","#05668d",
   "#3b82f6"
 ];
-
-// localStorage key for custom colors
 const LS_CUSTOM = 'rc_custom_colors_v1';
 
-// ----- fallback files if manifest not found -----
+/* ----- fallback files ----- */
 const fallbackFiles = [
   "images/sample1.svg",
   "images/sample2.svg",
   "images/sample3.svg"
 ];
 
-// ----- Helpers: resize canvases and support HiDPI -----
+/* ----- Helpers: resize canvases (HiDPI aware) ----- */
 function resizeCanvases(preservePaint = true) {
   const rect = canvasWrap.getBoundingClientRect();
   const cssW = Math.max(1, Math.round(rect.width));
   const cssH = Math.max(1, Math.round(rect.height));
   const dpr = window.devicePixelRatio || 1;
 
-  // backup paint canvas content (CSS pixel space)
-  let tempImage = null;
+  // backup paint content (pixel buffer)
+  let temp = null;
   if (preservePaint && paintCanvas.width && paintCanvas.height) {
-    tempImage = document.createElement('canvas');
-    tempImage.width = paintCanvas.width;
-    tempImage.height = paintCanvas.height;
-    tempImage.getContext('2d').drawImage(paintCanvas, 0, 0);
+    temp = document.createElement('canvas');
+    temp.width = paintCanvas.width;
+    temp.height = paintCanvas.height;
+    temp.getContext('2d').drawImage(paintCanvas, 0, 0);
   }
 
-  // set CSS size and backing pixel size
+  // set CSS sizes and pixel backing sizes
   [paintCanvas, outlineCanvas].forEach(c => {
     c.style.width = cssW + 'px';
     c.style.height = cssH + 'px';
@@ -76,19 +71,18 @@ function resizeCanvases(preservePaint = true) {
     c.height = Math.round(cssH * dpr);
   });
 
-  // set transforms so we draw in CSS pixel coords
+  // set transform so we can draw using CSS pixels (user space)
   paintCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   outlineCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  // restore paint content
-  if (tempImage) {
+  // restore paint content scaled to new CSS size
+  if (temp) {
     paintCtx.clearRect(0,0,cssW,cssH);
-    paintCtx.drawImage(tempImage, 0, 0, cssW, cssH);
+    paintCtx.drawImage(temp, 0, 0, cssW, cssH);
   } else {
     paintCtx.clearRect(0,0,cssW,cssH);
   }
 
-  // re-render outline if present
   if (currentSVGUrl) {
     renderSVGToOutline(currentSVGUrl).catch(err => console.error(err));
   } else {
@@ -96,7 +90,7 @@ function resizeCanvases(preservePaint = true) {
   }
 }
 
-// ----- Manifest loader -----
+/* ----- Manifest loader ----- */
 async function loadManifest(){
   try {
     const res = await fetch('images/manifest.json', {cache: "no-store"});
@@ -109,11 +103,11 @@ async function loadManifest(){
   }
 }
 
-// ----- Render SVG into outline canvas (fit + center) -----
+/* ----- Render SVG into outline canvas ----- */
 async function renderSVGToOutline(url){
   try {
     const res = await fetch(url);
-    if(!res.ok) throw new Error('Fetch SVG failed: ' + url);
+    if(!res.ok) throw new Error('Fetch failed: ' + url);
     const svgText = await res.text();
     const svg64 = btoa(unescape(encodeURIComponent(svgText)));
     const dataUrl = 'data:image/svg+xml;base64,' + svg64;
@@ -135,6 +129,8 @@ async function renderSVGToOutline(url){
     const dx = (cssW - iwScaled) / 2;
     const dy = (cssH - ihScaled) / 2;
 
+    // Note: because we set transform(dpr,0,0,dpr,0,0),
+    // we supply coordinates in CSS pixels (dx,dy,iwScaled,ihScaled).
     outlineCtx.clearRect(0,0,cssW,cssH);
     outlineCtx.drawImage(img, dx, dy, iwScaled, ihScaled);
   } catch(err){
@@ -142,7 +138,7 @@ async function renderSVGToOutline(url){
   }
 }
 
-// ----- Drawing helpers -----
+/* ----- Drawing helpers ----- */
 function getPos(ev){
   const rect = canvasWrap.getBoundingClientRect();
   const clientX = ev.clientX ?? (ev.touches && ev.touches[0] && ev.touches[0].clientX);
@@ -174,7 +170,11 @@ function startDrawing(ev){
   drawing = true;
   last = getPos(ev);
   if(tool === 'fill'){
-    floodFill(Math.round(last.x), Math.round(last.y), hexToRgba(currentColor), 30);
+    // convert CSS coords to pixel coords for flood fill
+    const dpr = window.devicePixelRatio || 1;
+    const sx = Math.round(last.x * dpr);
+    const sy = Math.round(last.y * dpr);
+    floodFill(sx, sy, hexToRgba(currentColor), 30);
   } else if(tool === 'eraser'){
     drawStroke(last, last, true);
   } else {
@@ -192,7 +192,7 @@ function stopDrawing(ev){
   drawing = false;
 }
 
-// ----- Flood fill (respects outline alpha) -----
+/* ----- Flood fill (pixel-accurate) ----- */
 function hexToRgba(hex){
   const h = hex.replace('#','');
   const bigint = parseInt(h.length===3 ? h.split('').map(c=>c+c).join('') : h, 16);
@@ -201,62 +201,72 @@ function hexToRgba(hex){
   const b = bigint & 255;
   return {r,g,b,a:255};
 }
+
 function colorMatch(data, idx, color, tol=0){
   return Math.abs(data[idx] - color.r) <= tol &&
          Math.abs(data[idx+1] - color.g) <= tol &&
          Math.abs(data[idx+2] - color.b) <= tol &&
          Math.abs(data[idx+3] - color.a) <= tol;
 }
-function floodFill(startX, startY, fillColor, tolerance=30){
-  const rect = canvasWrap.getBoundingClientRect();
-  const w = Math.round(rect.width), h = Math.round(rect.height);
-  if(startX < 0 || startY < 0 || startX >= w || startY >= h) return;
-  const pImg = paintCtx.getImageData(0,0,w,h);
-  const oImg = outlineCtx.getImageData(0,0,w,h);
+
+function floodFill(startXpx, startYpx, fillColor, tolerance=30){
+  // now startXpx/startYpx are in pixel coordinates (not CSS)
+  const pixelW = paintCanvas.width;   // real pixel width
+  const pixelH = paintCanvas.height;  // real pixel height
+  if(startXpx < 0 || startYpx < 0 || startXpx >= pixelW || startYpx >= pixelH) return;
+
+  // Get image data for full pixel buffer
+  const pImg = paintCtx.getImageData(0,0,pixelW,pixelH);
+  const oImg = outlineCtx.getImageData(0,0,pixelW,pixelH);
   const data = pImg.data;
   const odata = oImg.data;
 
   const stack = [];
-  const startIdx = (startY * w + startX) * 4;
+  const startIdx = (startYpx * pixelW + startXpx) * 4;
   const target = { r: data[startIdx], g: data[startIdx+1], b: data[startIdx+2], a: data[startIdx+3] };
 
-  // Don't fill on outline pixel
+  // if clicked on outline (alpha > threshold) -> don't fill
   if(odata[startIdx + 3] > 10) return;
 
+  // if target already equals fillColor (within tol) and opaque, skip
   if(Math.abs(target.r - fillColor.r) <= tolerance &&
      Math.abs(target.g - fillColor.g) <= tolerance &&
      Math.abs(target.b - fillColor.b) <= tolerance &&
      target.a === 255) return;
 
-  stack.push([startX, startY]);
-  const visited = new Uint8Array(w * h);
+  stack.push([startXpx, startYpx]);
+  const visited = new Uint8Array(pixelW * pixelH);
 
   while(stack.length){
     const [x,y] = stack.pop();
-    const idx = (y * w + x);
+    const idx = (y * pixelW + x);
     const id = idx * 4;
     if(visited[idx]) continue;
     visited[idx] = 1;
 
+    // stop if outline at this pixel
     if(odata[id + 3] > 10) continue;
 
+    // check if pixel matches target color (within tolerance)
     if(!colorMatch(data, id, target, tolerance) && !(data[id+3] === 0 && target.a === 0)) continue;
 
+    // paint pixel
     data[id] = fillColor.r;
     data[id+1] = fillColor.g;
     data[id+2] = fillColor.b;
     data[id+3] = fillColor.a;
 
-    if(x+1 < w) stack.push([x+1,y]);
+    if(x+1 < pixelW) stack.push([x+1,y]);
     if(x-1 >= 0) stack.push([x-1,y]);
-    if(y+1 < h) stack.push([x,y+1]);
+    if(y+1 < pixelH) stack.push([x,y+1]);
     if(y-1 >= 0) stack.push([x,y-1]);
   }
 
+  // write back full image data
   paintCtx.putImageData(pImg, 0, 0);
 }
 
-// ----- Save combined image (paint under outline) -----
+/* ----- save combined PNG ----- */
 function saveAsPNG(){
   const rect = canvasWrap.getBoundingClientRect();
   const cssW = Math.round(rect.width), cssH = Math.round(rect.height);
@@ -265,6 +275,7 @@ function saveAsPNG(){
   combo.height = cssH;
   const ctx = combo.getContext('2d');
 
+  // draw paint first, then outline on top
   ctx.drawImage(paintCanvas, 0, 0, combo.width, combo.height);
   ctx.drawImage(outlineCanvas, 0, 0, combo.width, combo.height);
 
@@ -275,7 +286,7 @@ function saveAsPNG(){
   a.click();
 }
 
-// ----- Palette UI -----
+/* ----- Palette UI ----- */
 function createColorBox(color, targetEl, persist=false){
   const box = document.createElement('button');
   box.className = 'color-box';
@@ -285,21 +296,16 @@ function createColorBox(color, targetEl, persist=false){
   box.type = 'button';
   box.addEventListener('click', () => {
     currentColor = color;
-    // sync both pickers
     colorPicker.value = color;
     pickerBottom.value = color;
   });
 
-  // right-click to remove from custom palette (if persist)
   if(persist){
     box.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      if(confirm('Remove this color from favorites?')){
-        removeCustomColor(color);
-      }
+      if(confirm('Remove this color from favorites?')) removeCustomColor(color);
     });
   }
-
   targetEl.appendChild(box);
 }
 
@@ -308,29 +314,25 @@ function loadDefaultPalette(){
   defaultColors.forEach(c => createColorBox(c, defaultPaletteEl, false));
 }
 
-function loadCustomPalette(){
-  customPaletteEl.innerHTML = '';
-  const arr = getCustomColors();
-  arr.forEach(c => createColorBox(c, customPaletteEl, true));
-}
-
 function getCustomColors(){
   try {
     const raw = localStorage.getItem(LS_CUSTOM);
     if(!raw) return [];
     const arr = JSON.parse(raw);
-    if(Array.isArray(arr)) return arr;
-    return [];
-  } catch(e) { return []; }
+    return Array.isArray(arr) ? arr : [];
+  } catch(e){ return []; }
 }
 function setCustomColors(arr){
   localStorage.setItem(LS_CUSTOM, JSON.stringify(arr));
+}
+function loadCustomPalette(){
+  customPaletteEl.innerHTML = '';
+  getCustomColors().forEach(c => createColorBox(c, customPaletteEl, true));
 }
 function addCustomColor(color){
   const arr = getCustomColors();
   if(arr.includes(color)) return;
   arr.unshift(color);
-  // keep at most 48 custom colors to avoid huge UI
   if(arr.length > 48) arr.length = 48;
   setCustomColors(arr);
   loadCustomPalette();
@@ -342,20 +344,20 @@ function removeCustomColor(color){
   loadCustomPalette();
 }
 function clearCustomColors(){
-  if(confirm('Clear all favorite colors?')) {
+  if(confirm('Clear all favorite colors?')){
     localStorage.removeItem(LS_CUSTOM);
     loadCustomPalette();
   }
 }
 
-// ----- Choose and load random SVG -----
+/* ----- load random SVG ----- */
 async function setupRandomImage(){
   try {
     const list = await loadManifest();
     const idx = Math.floor(Math.random() * list.length);
     const url = list[idx];
     currentSVGUrl = url;
-    // clear paint
+    // clear paint (CSS coords)
     const rect = canvasWrap.getBoundingClientRect();
     paintCtx.clearRect(0,0,rect.width,rect.height);
     await renderSVGToOutline(url);
@@ -364,17 +366,17 @@ async function setupRandomImage(){
   }
 }
 
-// ----- UI wiring -----
+/* ----- UI wiring ----- */
 function setToolFromUI(){
   document.querySelectorAll('input[name="tool"]').forEach(r=>{
     r.addEventListener('change', e => tool = e.target.value);
   });
-  // top color picker
+
+  // link both pickers
   colorPicker.addEventListener('input', e => {
     currentColor = e.target.value;
     pickerBottom.value = currentColor;
   });
-  // bottom picker
   pickerBottom.addEventListener('input', e => {
     currentColor = e.target.value;
     colorPicker.value = currentColor;
@@ -388,20 +390,13 @@ function setToolFromUI(){
     paintCtx.clearRect(0,0,rect.width,rect.height);
   });
   document.getElementById('saveBtn').addEventListener('click', saveAsPNG);
-  document.getElementById('newBtn').addEventListener('click', async ()=> {
-    await setupRandomImage();
-  });
+  document.getElementById('newBtn').addEventListener('click', async ()=> { await setupRandomImage(); });
 
-  addColorBtn.addEventListener('click', ()=> {
-    // use bottom picker value as source of "favorite"
-    const newColor = pickerBottom.value;
-    addCustomColor(newColor);
-  });
-
+  addColorBtn.addEventListener('click', ()=> addCustomColor(pickerBottom.value));
   clearCustomBtn.addEventListener('click', clearCustomColors);
 }
 
-// ----- Pointer binding -----
+/* ----- pointer events ----- */
 function bindPointerEvents(){
   paintCanvas.addEventListener('pointerdown', startDrawing, {passive:false});
   paintCanvas.addEventListener('pointermove', moveDrawing, {passive:false});
@@ -414,13 +409,12 @@ function bindPointerEvents(){
   paintCanvas.addEventListener('contextmenu', e => e.preventDefault());
 }
 
-// ----- Init -----
+/* ----- init ----- */
 let initialized = false;
 async function init(){
   if(initialized) return;
   initialized = true;
 
-  // initial size and listeners
   resizeCanvases(false);
   let resizeTimer = null;
   window.addEventListener('resize', ()=> {
@@ -428,14 +422,14 @@ async function init(){
     resizeTimer = setTimeout(()=> resizeCanvases(true), 120);
   });
 
-  // load palettes
+  // palette
   loadDefaultPalette();
   loadCustomPalette();
 
   setToolFromUI();
   bindPointerEvents();
 
-  // set initial color and size
+  // initial UI values
   currentColor = colorPicker.value;
   pickerBottom.value = currentColor;
   size = +sizeRange.value;
