@@ -1,31 +1,36 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Random Coloring — Paint</title>
-<link rel="stylesheet" href="styles.css" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Random Coloring — Paint</title>
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body class="color-page">
   <header class="toolbar">
     <button id="backBtn" class="small-btn">← Back</button>
+
     <div class="tools">
       <label class="tool"><input type="radio" name="tool" value="brush" checked> Brush</label>
       <label class="tool"><input type="radio" name="tool" value="fill"> Fill</label>
       <label class="tool"><input type="radio" name="tool" value="eraser"> Eraser</label>
+
       <label class="tool"><input type="color" id="colorPicker" value="#FF6B6B"></label>
-      <label class="tool"><input id="sizeRange" type="range" min="1" max="60" value="12"></label>
+      <label class="tool"><input id="sizeRange" type="range" min="1" max="80" value="12"></label>
+
       <button id="clearBtn" class="small-btn">Clear</button>
       <button id="saveBtn" class="small-btn">Save PNG</button>
       <button id="newBtn" class="small-btn">New Random</button>
     </div>
   </header>
 
-  <main class="canvas-wrap">
-    <canvas id="outlineCanvas"></canvas>
-    <canvas id="paintCanvas"></canvas>
+  <!-- Canvas wrapper: paintCanvas (below) then outlineCanvas (above).
+       Outline canvas has pointer-events: none so it doesn't block drawing. -->
+  <main class="canvas-wrap" id="canvasWrap">
+    <canvas id="paintCanvas" aria-label="Paint canvas"></canvas>
+    <canvas id="outlineCanvas" aria-label="Outline canvas"></canvas>
   </main>
 
-<script src="script.js"></script>
+  <script src="script.js"></script>
 </body>
 </html>
