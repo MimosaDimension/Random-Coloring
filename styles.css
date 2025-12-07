@@ -23,13 +23,41 @@ body{margin:0;font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI",
 .tools{display:flex;gap:8px;align-items:center;margin-left:8px;flex-wrap:wrap}
 .tool{display:inline-flex;align-items:center;gap:6px;font-size:14px;color:var(--muted)}
 #colorPicker{width:44px;height:38px;padding:0;border-radius:8px;border:1px solid #eee}
+#pickerBottom{width:44px;height:38px;padding:0;border-radius:8px;border:1px solid #eee}
 #sizeRange{width:110px}
+
+/* Palette styles */
+.palette-container {
+    width: min(1000px, 96vw);
+    margin: 12px auto;
+    text-align: center;
+    padding: 6px 12px;
+}
+.palette-title { font-weight:700; color:var(--muted); margin-bottom:8px; }
+.palette-row {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+.color-box {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    border: 1px solid rgba(0,0,0,0.12);
+    cursor: pointer;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.04);
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.color-box:hover { transform: scale(1.12); box-shadow: 0 6px 18px rgba(0,0,0,0.08); }
+.picker-row { margin-top: 8px; display:flex; justify-content:center; gap:10px; align-items:center; }
 
 /* Canvas container */
 .canvas-wrap{
   width: min(1000px, 96vw);
-  height: min(720px, 76vh);
-  margin: 18px auto;
+  height: min(720px, 66vh);
+  margin: 12px auto 48px auto;
   position:relative;
   border-radius:12px;
   background: #fff;
@@ -45,22 +73,18 @@ body{margin:0;font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI",
   width:100%;
   height:100%;
   display:block;
-  touch-action: none; /* allow pointer events for drawing smoothly */
+  touch-action: none;
 }
 
 /* paint canvas (user draws here) - below outlines */
-#paintCanvas{
-  z-index:1;
-}
+#paintCanvas{ z-index:1; }
 
 /* outline canvas (SVG contours) - stays above, but does not capture pointer events */
-#outlineCanvas{
-  z-index:2;
-  pointer-events: none; /* allow clicks to pass through to paintCanvas */
-}
+#outlineCanvas{ z-index:2; pointer-events: none; }
 
-/* small responsive tweak for mobile */
+/* small responsive tweak */
 @media (max-width:600px){
   .big-btn{padding:14px 22px;font-size:18px}
   #sizeRange{width:90px}
+  .color-box{width:24px;height:24px}
 }
