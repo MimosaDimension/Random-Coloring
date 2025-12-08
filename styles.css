@@ -88,3 +88,27 @@ body{margin:0;font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI",
   #sizeRange{width:90px}
   .color-box{width:24px;height:24px}
 }
+#canvasContainer {
+    position: relative;
+    width: 700px;
+    height: 500px;
+    margin: 0 auto;
+}
+
+#paintCanvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 700px !important;   /* фиксировано */
+    height: 500px !important;  /* фиксировано */
+    image-rendering: pixelated;
+}
+
+#lineArt {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;   /* SVG можно масштабировать */
+    height: 100%;
+    pointer-events: none;
+}
