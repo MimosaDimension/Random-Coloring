@@ -1,14 +1,9 @@
-/* script.js
-   Fix: keep painting stable at window resize by using a fixed logical canvas space (800x600).
-   Only this file is changed compared to previous repo: resize + coordinate mapping updated.
-   Other UI (palette, buttons, etc.) is left unchanged.
+/* script.js — исправленная версия
+   Главный фикс: floodFill и работа с ImageData теперь используют pixel coordinates (умножаем CSS coords на DPR)
+   и всегда читают/записывают данные с размерами canvas.width / canvas.height (в пикселях).
 */
 
-// ---- Constants: keep these exactly as required ----
-const LOGICAL_W = 1200;
-const LOGICAL_H = 800;
-
-// ---- DOM ----
+/* ----- DOM ----- */
 const paintCanvas = document.getElementById('paintCanvas');
 const outlineCanvas = document.getElementById('outlineCanvas');
 const canvasWrap = document.getElementById('canvasWrap');
@@ -16,8 +11,8 @@ const canvasWrap = document.getElementById('canvasWrap');
 const paintCtx = paintCanvas.getContext('2d');
 const outlineCtx = outlineCanvas.getContext('2d');
 
-const colorPicker = document.getElementById('colorPicker');
-const pickerBottom = document.getElementById('pickerBottom');
+const colorPicker = document.getElementById('colorPicker');    // top picker
+const pickerBottom = document.getElementById('pickerBottom');  // bottom picker
 const sizeRange = document.getElementById('sizeRange');
 
 const defaultPaletteEl = document.getElementById('defaultPalette');
@@ -25,86 +20,137 @@ const customPaletteEl = document.getElementById('customPalette');
 const addColorBtn = document.getElementById('addColorBtn');
 const clearCustomBtn = document.getElementById('clearCustomBtn');
 
+/* ----- State ----- */
 let tool = 'brush';
 let currentColor = '#FF6B6B';
 let size = 12;
 let drawing = false;
-let last = {x:0, y:0};
+let last = {x:0,y:0};
 let currentSVGUrl = null;
 
-// fallback files (keeps behavior if manifest missing)
+/* ----- palettes ----- */
+const defaultColors = [
+  "#000000","#474747","#7f7f7f","#bfbfbf","#ffffff",
+  "#ff4d4d","#e63946","#b00020",
+  "#ffb703","#fb8500","#ffd166",
+  "#ffd54f","#c5a300","#9a7d00",
+  "#4caf50","#2e8b57","#0b8a3e",
+  "#06b6d4","#0891b2","#05668d",
+  "#3b82f6"
+];
+const LS_CUSTOM = 'rc_custom_colors_v1';
+
+/* ----- fallback files ----- */
 const fallbackFiles = [
   "images/sample1.svg",
   "images/sample2.svg",
   "images/sample3.svg"
 ];
 
-// --- Setup: initialize canvas backing buffers once (DPR-aware)
-function initCanvases() {
+/* ----- Helpers: resize canvases (HiDPI aware) ----- */
+function resizeCanvases(preservePaint = true) {
+  const rect = canvasWrap.getBoundingClientRect();
+  const cssW = Math.max(1, Math.round(rect.width));
+  const cssH = Math.max(1, Math.round(rect.height));
   const dpr = window.devicePixelRatio || 1;
-  // set backing store size to logical * dpr (do NOT change this on window resize)
-  paintCanvas.width = Math.round(LOGICAL_W * dpr);
-  paintCanvas.height = Math.round(LOGICAL_H * dpr);
-  outlineCanvas.width = Math.round(LOGICAL_W * dpr);
-  outlineCanvas.height = Math.round(LOGICAL_H * dpr);
 
-  // set transform so that drawing commands use logical coordinates (0..LOGICAL_W)
+  // backup paint content (pixel buffer)
+  let temp = null;
+  if (preservePaint && paintCanvas.width && paintCanvas.height) {
+    temp = document.createElement('canvas');
+    temp.width = paintCanvas.width;
+    temp.height = paintCanvas.height;
+    temp.getContext('2d').drawImage(paintCanvas, 0, 0);
+  }
+
+  // set CSS sizes and pixel backing sizes
+  [paintCanvas, outlineCanvas].forEach(c => {
+    c.style.width = cssW + 'px';
+    c.style.height = cssH + 'px';
+    c.width = Math.round(cssW * dpr);
+    c.height = Math.round(cssH * dpr);
+  });
+
+  // set transform so we can draw using CSS pixels (user space)
   paintCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   outlineCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-}
 
-// --- Resize display (changes CSS size to fit container, keeps aspect ratio)
-// We DO NOT change canvas.width/height here (so pixel buffer unchanged).
-function resizeDisplay() {
-  // compute available width inside wrapper parent (canvasWrap's parent)
-  // We'll set CSS width equal to the wrapper's computed width (it is responsive), and compute height by aspect ratio.
-  const wrapperRect = canvasWrap.getBoundingClientRect();
-  const availableW = Math.max(40, Math.round(wrapperRect.width)); // at least tiny non-zero
-  const cssW = availableW;
-  const cssH = Math.round(cssW * (LOGICAL_H / LOGICAL_W));
+  // restore paint content scaled to new CSS size
+  if (temp) {
+    paintCtx.clearRect(0,0,cssW,cssH);
+    paintCtx.drawImage(temp, 0, 0, cssW, cssH);
+  } else {
+    paintCtx.clearRect(0,0,cssW,cssH);
+  }
 
-  // set explicit height on wrapper so canvases (100%/100%) scale nicely
-  canvasWrap.style.height = cssH + 'px';
-
-  // set canvas CSS display size
-  paintCanvas.style.width = cssW + 'px';
-  paintCanvas.style.height = cssH + 'px';
-  outlineCanvas.style.width = cssW + 'px';
-  outlineCanvas.style.height = cssH + 'px';
-
-  // re-render outline (it uses logical coords)
   if (currentSVGUrl) {
     renderSVGToOutline(currentSVGUrl).catch(err => console.error(err));
+  } else {
+    outlineCtx.clearRect(0,0,cssW,cssH);
   }
 }
 
-// --- Helper: map a pointer event to logical canvas coordinates (0..LOGICAL_W/LOGICAL_H)
-function getLogicalPosFromEvent(ev) {
+/* ----- Manifest loader ----- */
+async function loadManifest(){
+  try {
+    const res = await fetch('images/manifest.json', {cache: "no-store"});
+    if(!res.ok) throw new Error('no manifest');
+    const list = await res.json();
+    if(!Array.isArray(list) || list.length === 0) throw new Error('manifest empty');
+    return list.map(name => name.startsWith('images/') ? name : `images/${name}`);
+  } catch (e) {
+    return fallbackFiles;
+  }
+}
+
+/* ----- Render SVG into outline canvas ----- */
+async function renderSVGToOutline(url){
+  try {
+    const res = await fetch(url);
+    if(!res.ok) throw new Error('Fetch failed: ' + url);
+    const svgText = await res.text();
+    const svg64 = btoa(unescape(encodeURIComponent(svgText)));
+    const dataUrl = 'data:image/svg+xml;base64,' + svg64;
+    const img = new Image();
+    img.src = dataUrl;
+    await img.decode();
+
+    const rect = canvasWrap.getBoundingClientRect();
+    const cssW = Math.max(1, Math.round(rect.width));
+    const cssH = Math.max(1, Math.round(rect.height));
+    const margin = 0.06;
+    const iw = img.width || 800;
+    const ih = img.height || 600;
+    const availableW = cssW * (1 - 2 * margin);
+    const availableH = cssH * (1 - 2 * margin);
+    const scale = Math.min(availableW / iw, availableH / ih);
+    const iwScaled = iw * scale;
+    const ihScaled = ih * scale;
+    const dx = (cssW - iwScaled) / 2;
+    const dy = (cssH - ihScaled) / 2;
+
+    // Note: because we set transform(dpr,0,0,dpr,0,0),
+    // we supply coordinates in CSS pixels (dx,dy,iwScaled,ihScaled).
+    outlineCtx.clearRect(0,0,cssW,cssH);
+    outlineCtx.drawImage(img, dx, dy, iwScaled, ihScaled);
+  } catch(err){
+    console.error('renderSVGToOutline error', err);
+  }
+}
+
+/* ----- Drawing helpers ----- */
+function getPos(ev){
   const rect = canvasWrap.getBoundingClientRect();
   const clientX = ev.clientX ?? (ev.touches && ev.touches[0] && ev.touches[0].clientX);
   const clientY = ev.clientY ?? (ev.touches && ev.touches[0] && ev.touches[0].clientY);
-  // clientX may be undefined in rare cases; guard
-  if (clientX == null || clientY == null) return { x: 0, y: 0 };
-
-  const cssW = parseFloat(getComputedStyle(paintCanvas).width);
-  const cssH = parseFloat(getComputedStyle(paintCanvas).height);
-
-  // compute position in CSS pixels relative to canvas
-  const cssX = clientX - rect.left;
-  const cssY = clientY - rect.top;
-
-  // map to logical coordinates
-  const logicalX = (cssX / cssW) * LOGICAL_W;
-  const logicalY = (cssY / cssH) * LOGICAL_H;
-  return { x: logicalX, y: logicalY };
+  return { x: clientX - rect.left, y: clientY - rect.top };
 }
 
-// --- Drawing stroke in logical coords
-function drawStrokeLogical(p0, p1, eraser=false) {
+function drawStroke(p0, p1, eraser=false){
   paintCtx.lineCap = 'round';
   paintCtx.lineJoin = 'round';
-  paintCtx.lineWidth = size; // size in logical units
-  if (eraser) {
+  paintCtx.lineWidth = size;
+  if(eraser){
     paintCtx.globalCompositeOperation = 'destination-out';
     paintCtx.strokeStyle = 'rgba(0,0,0,1)';
   } else {
@@ -119,32 +165,59 @@ function drawStrokeLogical(p0, p1, eraser=false) {
   paintCtx.globalCompositeOperation = 'source-over';
 }
 
-// --- Flood fill (works in pixel buffer)
-// We convert logical coords to pixel coords for ImageData operations.
-function hexToRgba(hex) {
+function startDrawing(ev){
+  ev.preventDefault();
+  drawing = true;
+  last = getPos(ev);
+  if(tool === 'fill'){
+    // convert CSS coords to pixel coords for flood fill
+    const dpr = window.devicePixelRatio || 1;
+    const sx = Math.round(last.x * dpr);
+    const sy = Math.round(last.y * dpr);
+    floodFill(sx, sy, hexToRgba(currentColor), 30);
+  } else if(tool === 'eraser'){
+    drawStroke(last, last, true);
+  } else {
+    drawStroke(last, last, false);
+  }
+}
+function moveDrawing(ev){
+  if(!drawing) return;
+  ev.preventDefault();
+  const pos = getPos(ev);
+  drawStroke(last, pos, tool === 'eraser');
+  last = pos;
+}
+function stopDrawing(ev){
+  drawing = false;
+}
+
+/* ----- Flood fill (pixel-accurate) ----- */
+function hexToRgba(hex){
   const h = hex.replace('#','');
   const bigint = parseInt(h.length===3 ? h.split('').map(c=>c+c).join('') : h, 16);
-  return { r: (bigint >> 16) & 255, g: (bigint >> 8) & 255, b: bigint & 255, a: 255 };
+  const r = (bigint >> 16) & 255;
+  const g = (bigint >> 8) & 255;
+  const b = bigint & 255;
+  return {r,g,b,a:255};
 }
-function colorMatch(data, idx, color, tol=0) {
+
+function colorMatch(data, idx, color, tol=0){
   return Math.abs(data[idx] - color.r) <= tol &&
          Math.abs(data[idx+1] - color.g) <= tol &&
          Math.abs(data[idx+2] - color.b) <= tol &&
          Math.abs(data[idx+3] - color.a) <= tol;
 }
-function floodFillLogical(logicalX, logicalY, fillColor, tolerance = 30) {
-  const dpr = window.devicePixelRatio || 1;
-  // convert logical to pixel coordinates in backing buffer
-  const startXpx = Math.round(logicalX * dpr);
-  const startYpx = Math.round(logicalY * dpr);
 
-  const pixelW = paintCanvas.width;   // LOGICAL_W * dpr
-  const pixelH = paintCanvas.height;  // LOGICAL_H * dpr
+function floodFill(startXpx, startYpx, fillColor, tolerance=30){
+  // now startXpx/startYpx are in pixel coordinates (not CSS)
+  const pixelW = paintCanvas.width;   // real pixel width
+  const pixelH = paintCanvas.height;  // real pixel height
+  if(startXpx < 0 || startYpx < 0 || startXpx >= pixelW || startYpx >= pixelH) return;
 
-  if (startXpx < 0 || startYpx < 0 || startXpx >= pixelW || startYpx >= pixelH) return;
-
-  const pImg = paintCtx.getImageData(0, 0, pixelW, pixelH);
-  const oImg = outlineCtx.getImageData(0, 0, pixelW, pixelH);
+  // Get image data for full pixel buffer
+  const pImg = paintCtx.getImageData(0,0,pixelW,pixelH);
+  const oImg = outlineCtx.getImageData(0,0,pixelW,pixelH);
   const data = pImg.data;
   const odata = oImg.data;
 
@@ -152,105 +225,68 @@ function floodFillLogical(logicalX, logicalY, fillColor, tolerance = 30) {
   const startIdx = (startYpx * pixelW + startXpx) * 4;
   const target = { r: data[startIdx], g: data[startIdx+1], b: data[startIdx+2], a: data[startIdx+3] };
 
-  if (odata[startIdx + 3] > 10) return; // clicked on outline
+  // if clicked on outline (alpha > threshold) -> don't fill
+  if(odata[startIdx + 3] > 10) return;
 
-  if (Math.abs(target.r - fillColor.r) <= tolerance &&
-      Math.abs(target.g - fillColor.g) <= tolerance &&
-      Math.abs(target.b - fillColor.b) <= tolerance &&
-      target.a === 255) return;
+  // if target already equals fillColor (within tol) and opaque, skip
+  if(Math.abs(target.r - fillColor.r) <= tolerance &&
+     Math.abs(target.g - fillColor.g) <= tolerance &&
+     Math.abs(target.b - fillColor.b) <= tolerance &&
+     target.a === 255) return;
 
   stack.push([startXpx, startYpx]);
   const visited = new Uint8Array(pixelW * pixelH);
 
-  while (stack.length) {
-    const [x, y] = stack.pop();
+  while(stack.length){
+    const [x,y] = stack.pop();
     const idx = (y * pixelW + x);
     const id = idx * 4;
-    if (visited[idx]) continue;
+    if(visited[idx]) continue;
     visited[idx] = 1;
 
-    if (odata[id + 3] > 10) continue; // outline blocks
+    // stop if outline at this pixel
+    if(odata[id + 3] > 10) continue;
 
-    if (!colorMatch(data, id, target, tolerance) && !(data[id+3] === 0 && target.a === 0)) continue;
+    // check if pixel matches target color (within tolerance)
+    if(!colorMatch(data, id, target, tolerance) && !(data[id+3] === 0 && target.a === 0)) continue;
 
+    // paint pixel
     data[id] = fillColor.r;
     data[id+1] = fillColor.g;
     data[id+2] = fillColor.b;
     data[id+3] = fillColor.a;
 
-    if (x + 1 < pixelW) stack.push([x+1, y]);
-    if (x - 1 >= 0) stack.push([x-1, y]);
-    if (y + 1 < pixelH) stack.push([x, y+1]);
-    if (y - 1 >= 0) stack.push([x, y-1]);
+    if(x+1 < pixelW) stack.push([x+1,y]);
+    if(x-1 >= 0) stack.push([x-1,y]);
+    if(y+1 < pixelH) stack.push([x,y+1]);
+    if(y-1 >= 0) stack.push([x,y-1]);
   }
 
+  // write back full image data
   paintCtx.putImageData(pImg, 0, 0);
 }
 
-// --- Render SVG into outline using logical coordinates (assumes viewBox 0 0 800 600)
-async function renderSVGToOutline(url) {
-  try {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error('Fetch SVG failed: ' + url);
-    const svgText = await res.text();
-    const svg64 = btoa(unescape(encodeURIComponent(svgText)));
-    const dataUrl = 'data:image/svg+xml;base64,' + svg64;
-    const img = new Image();
-    img.src = dataUrl;
-    await img.decode();
+/* ----- save combined PNG ----- */
+function saveAsPNG(){
+  const rect = canvasWrap.getBoundingClientRect();
+  const cssW = Math.round(rect.width), cssH = Math.round(rect.height);
+  const combo = document.createElement('canvas');
+  combo.width = cssW;
+  combo.height = cssH;
+  const ctx = combo.getContext('2d');
 
-    // draw the svg into logical area (0..LOGICAL_W, 0..LOGICAL_H)
-    outlineCtx.clearRect(0, 0, LOGICAL_W, LOGICAL_H);
-    // Because we set transform(dpr,0,0,dpr,..) earlier, drawing in logical coords is fine:
-    outlineCtx.drawImage(img, 0, 0, LOGICAL_W, LOGICAL_H);
-  } catch (err) {
-    console.error('renderSVGToOutline error', err);
-  }
-}
+  // draw paint first, then outline on top
+  ctx.drawImage(paintCanvas, 0, 0, combo.width, combo.height);
+  ctx.drawImage(outlineCanvas, 0, 0, combo.width, combo.height);
 
-// --- Save combined image (export at logical resolution)
-function saveAsPNG() {
-  const exportCanvas = document.createElement('canvas');
-  exportCanvas.width = LOGICAL_W;
-  exportCanvas.height = LOGICAL_H;
-  const ctx = exportCanvas.getContext('2d');
-
-  // draw paint (backing buffer is LOGICAL_W * dpr; draw scaled to logical size)
-  ctx.drawImage(paintCanvas, 0, 0, paintCanvas.width, paintCanvas.height, 0, 0, LOGICAL_W, LOGICAL_H);
-  ctx.drawImage(outlineCanvas, 0, 0, outlineCanvas.width, outlineCanvas.height, 0, 0, LOGICAL_W, LOGICAL_H);
-
-  const dataUrl = exportCanvas.toDataURL('image/png');
+  const dataUrl = combo.toDataURL('image/png');
   const a = document.createElement('a');
   a.href = dataUrl;
   a.download = 'coloring.png';
   a.click();
 }
 
-// --- Manifest loader (same behaviour as before)
-async function loadManifest() {
-  try {
-    const res = await fetch('images/manifest.json', { cache: "no-store" });
-    if (!res.ok) throw new Error('no manifest');
-    const list = await res.json();
-    if (!Array.isArray(list) || list.length === 0) throw new Error('manifest empty');
-    return list.map(name => name.startsWith('images/') ? name : `images/${name}`);
-  } catch (e) {
-    return fallbackFiles;
-  }
-}
-
-// --- Palette helpers (unchanged behavior; keep integration)
-const defaultColors = [
-  "#000000","#474747","#7f7f7f","#bfbfbf","#ffffff",
-  "#ff4d4d","#e63946","#b00020",
-  "#ffb703","#fb8500","#ffd166",
-  "#ffd54f","#c5a300","#9a7d00",
-  "#4caf50","#2e8b57","#0b8a3e",
-  "#06b6d4","#0891b2","#05668d",
-  "#3b82f6"
-];
-const LS_CUSTOM = 'rc_custom_colors_v1';
-
+/* ----- Palette UI ----- */
 function createColorBox(color, targetEl, persist=false){
   const box = document.createElement('button');
   box.className = 'color-box';
@@ -263,6 +299,7 @@ function createColorBox(color, targetEl, persist=false){
     colorPicker.value = color;
     pickerBottom.value = color;
   });
+
   if(persist){
     box.addEventListener('contextmenu', (e) => {
       e.preventDefault();
@@ -271,10 +308,12 @@ function createColorBox(color, targetEl, persist=false){
   }
   targetEl.appendChild(box);
 }
+
 function loadDefaultPalette(){
   defaultPaletteEl.innerHTML = '';
   defaultColors.forEach(c => createColorBox(c, defaultPaletteEl, false));
 }
+
 function getCustomColors(){
   try {
     const raw = localStorage.getItem(LS_CUSTOM);
@@ -311,27 +350,29 @@ function clearCustomColors(){
   }
 }
 
-// --- Setup random image and reset paint area
+/* ----- load random SVG ----- */
 async function setupRandomImage(){
   try {
     const list = await loadManifest();
     const idx = Math.floor(Math.random() * list.length);
     const url = list[idx];
     currentSVGUrl = url;
-    // clear paint (logical coords)
-    paintCtx.clearRect(0,0,LOGICAL_W,LOGICAL_H);
+    // clear paint (CSS coords)
+    const rect = canvasWrap.getBoundingClientRect();
+    paintCtx.clearRect(0,0,rect.width,rect.height);
     await renderSVGToOutline(url);
   } catch(err){
     console.error('setupRandomImage error', err);
   }
 }
 
-// --- UI wiring (same behavior)
+/* ----- UI wiring ----- */
 function setToolFromUI(){
   document.querySelectorAll('input[name="tool"]').forEach(r=>{
     r.addEventListener('change', e => tool = e.target.value);
   });
 
+  // link both pickers
   colorPicker.addEventListener('input', e => {
     currentColor = e.target.value;
     pickerBottom.value = currentColor;
@@ -344,7 +385,10 @@ function setToolFromUI(){
   sizeRange.addEventListener('input', e => size = +e.target.value);
 
   document.getElementById('backBtn').addEventListener('click', ()=> location.href = 'index.html');
-  document.getElementById('clearBtn').addEventListener('click', ()=> paintCtx.clearRect(0,0,LOGICAL_W,LOGICAL_H));
+  document.getElementById('clearBtn').addEventListener('click', ()=> {
+    const rect = canvasWrap.getBoundingClientRect();
+    paintCtx.clearRect(0,0,rect.width,rect.height);
+  });
   document.getElementById('saveBtn').addEventListener('click', saveAsPNG);
   document.getElementById('newBtn').addEventListener('click', async ()=> { await setupRandomImage(); });
 
@@ -352,67 +396,40 @@ function setToolFromUI(){
   clearCustomBtn.addEventListener('click', clearCustomColors);
 }
 
-// --- Pointer handling: map events to logical coords
-function startDrawing(ev){
-  ev.preventDefault();
-  drawing = true;
-  last = getLogicalPosFromEvent(ev);
-  if(tool === 'fill'){
-    floodFillLogical(last.x, last.y, hexToRgba(currentColor), 30);
-  } else if(tool === 'eraser') {
-    drawStrokeLogical(last, last, true);
-  } else {
-    drawStrokeLogical(last, last, false);
-  }
-}
-function moveDrawing(ev){
-  if(!drawing) return;
-  ev.preventDefault();
-  const pos = getLogicalPosFromEvent(ev);
-  drawStrokeLogical(last, pos, tool === 'eraser');
-  last = pos;
-}
-function stopDrawing(ev){
-  drawing = false;
-}
-
-// --- Bind pointers
+/* ----- pointer events ----- */
 function bindPointerEvents(){
   paintCanvas.addEventListener('pointerdown', startDrawing, {passive:false});
   paintCanvas.addEventListener('pointermove', moveDrawing, {passive:false});
   window.addEventListener('pointerup', stopDrawing);
 
+  // touch fallback
   paintCanvas.addEventListener('touchstart', startDrawing, {passive:false});
   paintCanvas.addEventListener('touchmove', moveDrawing, {passive:false});
   paintCanvas.addEventListener('touchend', stopDrawing);
   paintCanvas.addEventListener('contextmenu', e => e.preventDefault());
 }
 
-// --- Init
+/* ----- init ----- */
 let initialized = false;
 async function init(){
   if(initialized) return;
   initialized = true;
 
-  // initialize backing buffers
-  initCanvases();
-
-  // initial display size
-  resizeDisplay();
-
-  // resize handler: only update CSS/display (do NOT change backing buffer)
+  resizeCanvases(false);
   let resizeTimer = null;
   window.addEventListener('resize', ()=> {
     clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(()=> resizeDisplay(), 80);
+    resizeTimer = setTimeout(()=> resizeCanvases(true), 120);
   });
 
-  // palettes/UI
+  // palette
   loadDefaultPalette();
   loadCustomPalette();
+
   setToolFromUI();
   bindPointerEvents();
 
+  // initial UI values
   currentColor = colorPicker.value;
   pickerBottom.value = currentColor;
   size = +sizeRange.value;
