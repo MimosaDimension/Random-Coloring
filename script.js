@@ -5,8 +5,8 @@
 */
 
 // ---- Constants: keep these exactly as required ----
-const LOGICAL_W = 800;
-const LOGICAL_H = 600;
+const LOGICAL_W = 700;
+const LOGICAL_H = 500;
 
 // ---- DOM ----
 const paintCanvas = document.getElementById('paintCanvas');
