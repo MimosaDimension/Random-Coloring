@@ -56,7 +56,7 @@ body{margin:0;font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI",
 /* Canvas container */
 .canvas-wrap{
   width: min(1000px, 96vw);
-  /* height is controlled by JS to keep 800x600 aspect ratio */
+  height: min(720px, 66vh);
   margin: 12px auto 48px auto;
   position:relative;
   border-radius:12px;
