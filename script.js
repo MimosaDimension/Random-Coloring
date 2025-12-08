@@ -5,7 +5,7 @@
 */
 
 // ---- Constants: keep these exactly as required ----
-const LOGICAL_W = 1000;
+const LOGICAL_W = 1700;
 const LOGICAL_H = 500;
 
 // ---- DOM ----
