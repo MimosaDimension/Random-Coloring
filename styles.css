@@ -55,7 +55,7 @@ body{margin:0;font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI",
 
 /* Canvas container */
 .canvas-wrap{
-  width: min(2800px, 96vw);
+  width: min(1000px, 96vw);
   height: min(720px, 66vh);
   margin: 12px auto 48px auto;
   position:relative;
